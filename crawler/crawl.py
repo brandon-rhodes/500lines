@@ -14,7 +14,6 @@
 # - Use ETag and If-Modified-Since?
 # - Handle out of file descriptors directly?  (How?)
 
-import argparse
 import asyncio
 import asyncio.locks
 import cgi
@@ -25,45 +24,6 @@ import signal
 import sys
 import time
 import urllib.parse
-
-
-ARGS = argparse.ArgumentParser(description="Web crawler")
-ARGS.add_argument(
-    '--iocp', action='store_true', dest='iocp',
-    default=False, help='Use IOCP event loop (Windows only)')
-ARGS.add_argument(
-    '--select', action='store_true', dest='select',
-    default=False, help='Use Select event loop instead of default')
-ARGS.add_argument(
-    'roots', nargs='*',
-    default=[], help='Root URL (may be repeated)')
-ARGS.add_argument(
-    '--max_redirect', action='store', type=int, metavar='N',
-    default=10, help='Limit redirection chains (for 301, 302 etc.)')
-ARGS.add_argument(
-    '--max_tries', action='store', type=int, metavar='N',
-    default=4, help='Limit retries on network errors')
-ARGS.add_argument(
-    '--max_tasks', action='store', type=int, metavar='N',
-    default=100, help='Limit concurrent connections')
-ARGS.add_argument(
-    '--max_pool', action='store', type=int, metavar='N',
-    default=100, help='Limit connection pool size')
-ARGS.add_argument(
-    '--exclude', action='store', metavar='REGEX',
-    help='Exclude matching URLs')
-ARGS.add_argument(
-    '--strict', action='store_true',
-    default=True, help='Strict host matching (default)')
-ARGS.add_argument(
-    '--lenient', action='store_false', dest='strict',
-    default=False, help='Lenient host matching')
-ARGS.add_argument(
-    '-v', '--verbose', action='count', dest='level',
-    default=1, help='Verbose logging (repeat for more verbose)')
-ARGS.add_argument(
-    '-q', '--quiet', action='store_const', const=0, dest='level',
-    default=1, help='Quiet logging (opposite of --verbose)')
 
 
 ESCAPES = [('quot', '"'),
@@ -815,38 +775,17 @@ class Crawler:
         print('Date:', time.ctime(), 'local time', file=file)
 
 
-def main():
-    """Main program.
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    log = Logger(level=0)
 
-    Parse arguments, set up event loop, run crawler, print report.
-    """
-    args = ARGS.parse_args()
-    if not args.roots:
-        print('Use --help for command line help')
-        return
+    # asyncio.set_event_loop(ProactorEventLoop())
+    # asyncio.set_event_loop(asyncio.SelectorEventLoop())
+    loop = asyncio.get_event_loop()
 
-    log = Logger(args.level)
-
-    if args.iocp:
-        from asyncio.windows_events import ProactorEventLoop
-        loop = ProactorEventLoop()
-        asyncio.set_event_loop(loop)
-    elif args.select:
-        loop = asyncio.SelectorEventLoop()
-        asyncio.set_event_loop(loop)
-    else:
-        loop = asyncio.get_event_loop()
-
-    roots = {fix_url(root) for root in args.roots}
-
-    crawler = Crawler(log,
-                      roots, exclude=args.exclude,
-                      strict=args.strict,
-                      max_redirect=args.max_redirect,
-                      max_tries=args.max_tries,
-                      max_tasks=args.max_tasks,
-                      max_pool=args.max_pool,
-                      )
+    roots = {fix_url('http://xkcd.com/')}
+    crawler = Crawler(log, roots, exclude=None, strict=True, max_redirect=10,
+                      max_tries=4, max_tasks=100, max_pool=100)
     try:
         loop.run_until_complete(crawler.crawl())  # Crawler gonna crawl.
     except KeyboardInterrupt:
@@ -856,8 +795,3 @@ def main():
         crawler.report()
         crawler.close()
         loop.close()
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    main()
