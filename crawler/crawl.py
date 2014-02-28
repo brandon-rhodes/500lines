@@ -25,6 +25,7 @@ import signal
 import sys
 import time
 import urllib.parse
+from collections import OrderedDict
 
 
 ARGS = argparse.ArgumentParser(description="Web crawler")
@@ -302,7 +303,7 @@ class Request:
             self.full_path = self.path
         self.http_version = 'HTTP/1.1'
         self.method = 'GET'
-        self.headers = []
+        self.headers = OrderedDict()
         self.conn = None
 
     @asyncio.coroutine
@@ -324,29 +325,18 @@ class Request:
             self.conn = None
 
     @asyncio.coroutine
-    def putline(self, line):
-        """Write a line to the connection.
-
-        Used for the request line and headers.
-        """
-        self.log(2, '>', line)
-        self.conn.writer.write(line.encode('latin-1') + b'\r\n')
-
-    @asyncio.coroutine
     def send_request(self):
         """Send the request."""
-        request_line = '%s %s %s' % (self.method, self.full_path,
-                                     self.http_version)
-        yield from self.putline(request_line)
-        # TODO: What if a header is already set?
-        self.headers.append(('User-Agent', 'asyncio-example-crawl/0.0'))
-        self.headers.append(('Host', self.netloc))
-        self.headers.append(('Accept', '*/*'))
-        ##self.headers.append(('Accept-Encoding', 'gzip'))
-        for key, value in self.headers:
-            line = '%s: %s' % (key, value)
-            yield from self.putline(line)
-        yield from self.putline('')
+        lines = [' '.join([self.method, self.full_path, self.http_version])]
+        self.headers.setdefault('User-Agent', 'asyncio-example-crawl/0.0')
+        self.headers.setdefault('Host', self.netloc)
+        self.headers.setdefault('Accept', '*/*')
+        ##self.headers.setdefault('Accept-Encoding', 'gzip')
+        lines.extend('%s: %s' % keyvalue for keyvalue in self.headers.items())
+        for line in lines:
+            self.log(2, '>', line)
+        data = '\r\n'.join(lines).encode('latin-1')
+        self.conn.writer.write(data + b'\r\n\r\n')
 
     @asyncio.coroutine
     def get_response(self):
