@@ -265,7 +265,7 @@ class Response:
         self.http_version = None  # 'HTTP/1.1'
         self.status = None  # 200
         self.reason = None  # 'Ok'
-        self.headers = []  # [('Content-Type', 'text/html')]
+        self.headers = {}      # {'content-type': 'text/html'}
 
     @asyncio.coroutine
     def getline(self):
@@ -290,21 +290,13 @@ class Response:
                 break
             # TODO: Continuation lines.
             key, value = header_line.split(':', 1)
-            self.headers.append((key, value.strip()))
+            self.headers[key.lower()] = value.strip()
 
     def get_redirect_url(self, default=''):
         """Inspect the status and return the redirect url if appropriate."""
         if self.status not in (300, 301, 302, 303, 307):
             return default
-        return self.get_header('Location', default)
-
-    def get_header(self, key, default=''):
-        """Get one header value, using a case insensitive header name."""
-        key = key.lower()
-        for k, v in self.headers:
-            if k.lower() == key:
-                return v
-        return default
+        return self.headers.get('location', default)
 
     @asyncio.coroutine
     def read(self):
@@ -312,43 +304,36 @@ class Response:
 
         This honors Content-Length and Transfer-Encoding: chunked.
         """
-        nbytes = None
-        for key, value in self.headers:
-            if key.lower() == 'content-length':
-                nbytes = int(value)
+        if 'content-length' in self.headers:
+            nbytes = int(self.headers['content-length'])
+            return (yield from self.reader.readexactly(nbytes))
+        if self.headers.get('transfer-encoding', '').lower() != 'chunked':
+            logger.debug('reading until EOF')
+            return (yield from self.reader.read())
+            # TODO: Should make sure not to recycle the connection
+            # in this case.
+        logger.info('parsing chunked response')
+        blocks = []
+        while True:
+            size_header = yield from self.reader.readline()
+            if not size_header:
+                logger.error('premature end of chunked response')
                 break
-        if nbytes is None:
-            if self.get_header('transfer-encoding').lower() == 'chunked':
-                logger.info('parsing chunked response')
-                blocks = []
-                while True:
-                    size_header = yield from self.reader.readline()
-                    if not size_header:
-                        logger.error('premature end of chunked response')
-                        break
-                    logger.debug('size_header = %r', size_header)
-                    parts = size_header.split(b';')
-                    size = int(parts[0], 16)
-                    if size:
-                        logger.debug('reading chunk of %r bytes', size)
-                        block = yield from self.reader.readexactly(size)
-                        assert len(block) == size, (len(block), size)
-                        blocks.append(block)
-                    crlf = yield from self.reader.readline()
-                    assert crlf == b'\r\n', repr(crlf)
-                    if not size:
-                        break
-                body = b''.join(blocks)
-                logger.warn('chunked response had %r bytes in %r blocks',
-                            len(body), len(blocks))
-            else:
-                logger.debug('reading until EOF')
-                body = yield from self.reader.read()
-                # TODO: Should make sure not to recycle the connection
-                # in this case.
-        else:
-            body = yield from self.reader.readexactly(nbytes)
-        return body
+            logger.debug('size_header = %r', size_header)
+            parts = size_header.split(b';')
+            size = int(parts[0], 16)
+            if size:
+                logger.debug('reading chunk of %r bytes', size)
+                block = yield from self.reader.readexactly(size)
+                assert len(block) == size, (len(block), size)
+                blocks.append(block)
+            crlf = yield from self.reader.readline()
+            assert crlf == b'\r\n', repr(crlf)
+            if not size:
+                break
+        body = b''.join(blocks)
+        logger.warn('chunked response had %r bytes in %r blocks',
+                    len(body), len(blocks))
 
 
 class Fetcher:
@@ -403,8 +388,8 @@ class Fetcher:
                 yield from self.request.send_request()
                 self.response = yield from self.request.get_response()
                 self.body = yield from self.response.read()
-                h_conn = self.response.get_header('connection').lower()
-                h_t_enc = self.response.get_header('transfer-encoding').lower()
+                h_conn = self.response.headers.get('connection', '').lower()
+                h_t_enc = self.response.headers.get('transfer-encoding', '').lower()
                 if h_conn != 'close':
                     self.request.close(recycle=True)
                     self.request = None
@@ -435,7 +420,7 @@ class Fetcher:
                              self.next_url, self.url)
         else:
             if self.response.status == 200:
-                self.ctype = self.response.get_header('content-type')
+                self.ctype = self.response.headers.get('content-type', '')
                 self.pdict = {}
                 if self.ctype:
                     self.ctype, self.pdict = cgi.parse_header(self.ctype)
