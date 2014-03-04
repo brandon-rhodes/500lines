@@ -185,71 +185,42 @@ class Connection:
             self.pool = self.reader = self.writer = None
 
 
-class Request:
-    """HTTP request.
+@asyncio.coroutine
+def make_http_request(url, pool, method='GET', headers={}):
+    """Ask the pool for a connection and request the given URL.
 
-    Use connect() to open a connection; send_request() to send the
-    request; get_response() to receive the response headers.
+    Returns a connection, and a Response that has already read its headers.
+
     """
+    parts = urllib.parse.urlparse(url)
+    assert parts.scheme in ('http', 'https'), repr(url)
+    use_ssl = (parts.scheme == 'https')
+    port = parts.port or (443 if self.ssl else 80)
+    path = parts.path or '/'
+    if parts.query:
+        path = '%s?%s' % (path, parts.query)
+    http_version = 'HTTP/1.1'
 
-    def __init__(self, url, pool):
-        self.url = url
-        self.pool = pool
-        self.parts = urllib.parse.urlparse(self.url)
-        self.scheme = self.parts.scheme
-        assert self.scheme in ('http', 'https'), repr(url)
-        self.ssl = self.parts.scheme == 'https'
-        self.netloc = self.parts.netloc
-        self.hostname = self.parts.hostname
-        self.port = self.parts.port or (443 if self.ssl else 80)
-        self.path = (self.parts.path or '/')
-        self.query = self.parts.query
-        if self.query:
-            self.full_path = '%s?%s' % (self.path, self.query)
-        else:
-            self.full_path = self.path
-        self.http_version = 'HTTP/1.1'
-        self.method = 'GET'
-        self.headers = collections.OrderedDict()
-        self.conn = None
+    logger.warn('* Connecting to %s:%s using %s for %s',
+                parts.hostname, port, 'ssl' if use_ssl else 'tcp', url)
 
-    @asyncio.coroutine
-    def connect(self):
-        """Open a connection to the server."""
-        logger.warn('* Connecting to %s:%s using %s for %s',
-                    self.hostname, self.port,
-                    'ssl' if self.ssl else 'tcp',
-                    self.url)
-        self.conn = yield from self.pool.get_connection(self.hostname,
-                                                        self.port, self.ssl)
+    conn = yield from pool.get_connection(parts.hostname, port, use_ssl)
 
-    def close(self, recycle=False):
-        """Close the connection, recycle if requested."""
-        if self.conn is not None:
-            if not recycle:
-                logger.warn('closing connection %r', self.conn.key)
-            self.conn.close(recycle)
-            self.conn = None
+    headers.setdefault('User-Agent', 'asyncio-example-crawl/0.0')
+    headers.setdefault('Host', parts.netloc)
+    headers.setdefault('Accept', '*/*')
+    ##self.headers.setdefault('Accept-Encoding', 'gzip')
 
-    @asyncio.coroutine
-    def send_request(self):
-        """Send the request."""
-        self.headers.setdefault('User-Agent', 'asyncio-example-crawl/0.0')
-        self.headers.setdefault('Host', self.netloc)
-        self.headers.setdefault('Accept', '*/*')
-        ##self.headers.setdefault('Accept-Encoding', 'gzip')
-        lines = ['%s %s %s' % (self.method, self.full_path, self.http_version)]
-        lines.extend('%s: %s' % kv for kv in self.headers.items())
-        for line in lines + ['']:
-            logger.info('> %s', line)
-        self.conn.writer.write('\r\n'.join(lines + ['', '']).encode('latin-1'))
+    request_line = '%s %s %s' % (method, path, http_version)
+    header_lines = ['%s: %s' % kv for kv in headers.items()]
+    lines = [request_line] + header_lines + ['']
+    for line in lines:
+        logger.info('> %s', line)
+    conn.writer.write('\r\n'.join(lines + ['']).encode('latin-1'))
 
-    @asyncio.coroutine
-    def get_response(self):
-        """Receive the response."""
-        response = Response(self.conn.reader)
-        yield from response.read_headers()
-        return response
+    response = Response(conn.reader)
+    yield from response.read_headers()
+    return conn, response
 
 
 class Response:
@@ -377,7 +348,6 @@ class Fetcher:
         self.task = None
         self.exceptions = []
         self.tries = 0
-        self.request = None
         self.response = None
         self.body = None
         self.next_url = None
@@ -396,18 +366,16 @@ class Fetcher:
         """
         while self.tries < self.max_tries:
             self.tries += 1
-            self.request = None
+            conn = None
             try:
-                self.request = Request(self.url, self.crawler.pool)
-                yield from self.request.connect()
-                yield from self.request.send_request()
-                self.response = yield from self.request.get_response()
+                conn, self.response = yield from make_http_request(
+                    self.url, self.crawler.pool)
                 self.body = yield from self.response.read()
                 h_conn = self.response.get_header('connection').lower()
                 h_t_enc = self.response.get_header('transfer-encoding').lower()
                 if h_conn != 'close':
-                    self.request.close(recycle=True)
-                    self.request = None
+                    conn.close(recycle=True)
+                    conn = None
                 if self.tries > 1:
                     logger.warn('try %r for %r success', self.tries, self.url)
                 break
@@ -417,8 +385,8 @@ class Fetcher:
                 ##import pdb; pdb.set_trace()
                 # Don't reuse the connection in this case.
             finally:
-                if self.request is not None:
-                    self.request.close()
+                if conn is not None:
+                    conn.close()
         else:
             # We never broke out of the while loop, i.e. all tries failed.
             logger.error('no success for %r in %r tries',
