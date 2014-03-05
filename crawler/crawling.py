@@ -1,41 +1,21 @@
 """A simple web crawler -- classes implementing crawling logic."""
 
-# TODO:
-# - More organized logging (with task ID or URL?).
-# - KeyboardInterrupt in HTML parsing may hang or report unretrieved error.
-# - Support gzip encoding.
-# - Close connection if HTTP/1.0 response.
-# - Add timeouts.  (E.g. when switching networks, all seems to hang.)
-# - Skip reading large non-text/html files?
-# - Use ETag and If-Modified-Since?
-# - Handle out of file descriptors directly?  (How?)
-
 import asyncio
 import cgi
-import collections
 from http.client import BadStatusLine
 import logging
 import re
-import signal
-import sys
 import time
 import urllib.parse
 
 logger = logging.getLogger(__name__)
 
 
-ESCAPES = [('quot', '"'),
-           ('gt', '>'),
-           ('lt', '<'),
-           ('amp', '&')  # Must be last.
-           ]
+ESCAPES = ('quot', '"'), ('gt', '>'), ('lt', '<'), ('amp', '&')  # & goes last!
 
 
 def unescape(url):
-    """Turn &amp; into &, and so on.
-
-    This is the inverse of cgi.escape().
-    """
+    """Turn &amp; into & and so forth; the inverse of cgi.escape()."""
     for name, char in ESCAPES:
         url = url.replace('&' + name + ';', char)
     return url
@@ -110,10 +90,6 @@ class ConnectionPool:
 
         This also prunes the pool if it exceeds the size limits.
         """
-        if conn.stale():
-            conn.close()
-            return
-
         conns = self.connections.setdefault(conn.key, [])
         conns.append(conn)
         self.queue.append(conn)
@@ -212,7 +188,7 @@ def get_response(conn):
 
     status_line = yield from getline()
     status_parts = status_line.split(None, 2)
-    if len(status_parts) != 3:
+    if len(status_parts) != 3 or not status_parts[1].isdigit():
         logger.error('bad status_line %r', status_line)
         raise BadStatusLine(status_line)
     http_version, status, reason = status_parts
@@ -352,7 +328,7 @@ class Fetcher:
                 logger.warn('try %r for %r raised', self.tries, self.url, exc)
             finally:
                 if conn is not None:
-                    conn.close()
+                    conn.close(recycle=False)
         else:
             # We never broke out of the while loop, i.e. all tries failed.
             logger.error('no success for %r in %r tries',
@@ -427,15 +403,9 @@ class Crawler:
                 host = host.lower()
                 if self.strict:
                     self.root_domains.add(host)
-                    if host.startswith('www.'):
-                        self.root_domains.add(host[4:])
-                    else:
-                        self.root_domains.add('www.' + host)
                 else:
-                    parts = host.split('.')
-                    if len(parts) > 2:
-                        host = '.'.join(parts[-2:])
-                    self.root_domains.add(host)
+                    last_two_components = host.split('.')[-2:]
+                    self.root_domains.add('.'.join(last_two_components))
         for root in roots:
             self.add_url(root)
         self.governor = asyncio.Semaphore(max_tasks)
@@ -468,24 +438,17 @@ class Crawler:
         """Check if a host should be crawled, strict-ish version.
 
         This checks for equality modulo an initial 'www.' component.
-         """
-        if host.startswith('www.'):
-            if host[4:] in self.root_domains:
-                return True
-        else:
-            if 'www.' + host in self.root_domains:
-                return True
-        return False
+        """
+        host = host[4:] if host.startswith('www.') else 'www.' + host
+        return host in self.root_domains
 
     def _host_okay_lenient(self, host):
         """Check if a host should be crawled, lenient version.
 
         This compares the last two components of the host.
         """
-        parts = host.split('.')
-        if len(parts) > 2:
-            host = '.'.join(parts[-2:])
-        return host in self.root_domains
+        last_two_components = host.split('.')[-2:]
+        return ''.join(last_two_components) in self.root_domains
 
     def add_url(self, url, max_redirect=None):
         """Add a URL to the todo list if not seen before."""
