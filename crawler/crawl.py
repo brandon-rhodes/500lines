@@ -85,9 +85,8 @@ def main():
 
     roots = {fix_url(root) for root in args.roots}
 
-    crawler = crawling.Crawler(roots,
-                               exclude=args.exclude,
-                               strict=args.strict,
+    target = crawling.Target(roots, exclude=args.exclude, strict=args.strict)
+    crawler = crawling.Crawler(target,
                                max_redirect=args.max_redirect,
                                max_tries=args.max_tries,
                                max_tasks=args.max_tasks,

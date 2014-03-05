@@ -391,30 +391,13 @@ class Fetcher:
                             self.new_urls.add(url)
 
 
-class Crawler:
-    """Crawl a set of URLs.
+class Target:
+    """Description of the site (the set of URLs) the Crawler will crawl."""
 
-    This manages three disjoint sets of URLs (todo, busy, done).  The
-    data structures actually store dicts -- the values in todo give
-    the redirect limit, while the values in busy and done are Fetcher
-    instances.
-    """
-    def __init__(self, roots,
-                 exclude=None, strict=True,  # What to crawl.
-                 max_redirect=10, max_tries=4,  # Per-url limits.
-                 max_tasks=10, max_pool=10,  # Global limits.
-                 ):
+    def __init__(self, roots, exclude=None, strict=True):
         self.roots = roots
         self.exclude = exclude
         self.strict = strict
-        self.max_redirect = max_redirect
-        self.max_tries = max_tries
-        self.max_tasks = max_tasks
-        self.max_pool = max_pool
-        self.todo = {}
-        self.busy = {}
-        self.done = {}
-        self.pool = ConnectionPool(max_pool, max_tasks)
         self.root_domains = set()
         for root in roots:
             parts = urllib.parse.urlparse(root)
@@ -427,25 +410,11 @@ class Crawler:
                 host = host.lower()
                 if self.strict:
                     self.root_domains.add(host)
-                    if host.startswith('www.'):
-                        self.root_domains.add(host[4:])
-                    else:
-                        self.root_domains.add('www.' + host)
                 else:
                     parts = host.split('.')
                     if len(parts) > 2:
                         host = '.'.join(parts[-2:])
                     self.root_domains.add(host)
-        for root in roots:
-            self.add_url(root)
-        self.governor = asyncio.Semaphore(max_tasks)
-        self.termination = asyncio.Condition()
-        self.t0 = time.time()
-        self.t1 = None
-
-    def close(self):
-        """Close resources (currently only the pool)."""
-        self.pool.close()
 
     def host_okay(self, host):
         """Check if a host should be crawled.
@@ -487,8 +456,8 @@ class Crawler:
             host = '.'.join(parts[-2:])
         return host in self.root_domains
 
-    def add_url(self, url, max_redirect=None):
-        """Add a URL to the todo list if not seen before."""
+    def approve_url(self, url):
+        """Return whether a given URL should be crawled."""
         if self.exclude and re.search(self.exclude, url):
             return False
         parts = urllib.parse.urlparse(url)
@@ -498,6 +467,45 @@ class Crawler:
         host, port = urllib.parse.splitport(parts.netloc)
         if not self.host_okay(host):
             logger.info('skipping non-root host in %r', url)
+            return False
+        return True
+
+
+class Crawler:
+    """Crawl a set of URLs.
+
+    This manages three disjoint sets of URLs (todo, busy, done).  The
+    data structures actually store dicts -- the values in todo give
+    the redirect limit, while the values in busy and done are Fetcher
+    instances.
+    """
+    def __init__(self, target,               # What to crawl.
+                 max_redirect=10, max_tries=4,  # Per-url limits.
+                 max_tasks=10, max_pool=10,  # Global limits.
+                 ):
+        self.target = target
+        self.max_redirect = max_redirect
+        self.max_tries = max_tries
+        self.max_tasks = max_tasks
+        self.max_pool = max_pool
+        self.todo = {}
+        self.busy = {}
+        self.done = {}
+        self.pool = ConnectionPool(max_pool, max_tasks)
+        for root in target.roots:
+            self.add_url(root)
+        self.governor = asyncio.Semaphore(max_tasks)
+        self.termination = asyncio.Condition()
+        self.t0 = time.time()
+        self.t1 = None
+
+    def close(self):
+        """Close resources (currently only the pool)."""
+        self.pool.close()
+
+    def add_url(self, url, max_redirect=None):
+        """Add a URL to the todo list if not seen before."""
+        if not self.target.approve_url(url):
             return False
         if max_redirect is None:
             max_redirect = self.max_redirect
